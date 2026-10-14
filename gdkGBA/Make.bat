@@ -1,0 +1,1 @@
+mingw32-make CLIBS="-lmingw32 -mwindows -mconsole -lSDL2main"
