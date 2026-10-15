@@ -1,0 +1,1 @@
+c:\mingw\bin\gcc -O3 main.c arm.c arm_mem.c dma.c io.c sdl.c sound.c timer.c video.c -lSDL2 -lSDL2main -lmingw32 -o gdkgba
