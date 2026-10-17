@@ -21,6 +21,32 @@
 // video.c에서 렌더링하는 32비트 프레임 버퍼 참조
 extern uint32_t gba_screen[GBA_WIDTH * GBA_HEIGHT];
 
+extern uint32_t gba_screen_2x[480 * 320];
+extern uint32_t* screen_2x_ptr;
+
+extern uint32_t gba_screen_3x[720 * 480];
+extern uint32_t* screen_3x_ptr;
+extern int video_filter_mode;
+//extern void apply_scale2x(void);
+extern void apply_scale3x(void);
+
+// VB6 메뉴에서 호출할 비디오 필터 변경 함수 (mode: 0 = 원본, 1 = Scale2x)
+__declspec(dllexport) void __stdcall GBA_SetVideoFilter(int mode) {
+    video_filter_mode = mode;
+    apply_scale3x(); // 일시정지 상태에서도 즉시 화면에 반영되도록 1회 호출
+}
+
+// 방법 A: VB6가 만든 CreateDIBSection의 메모리 주소(pDIBBits)를 DLL에 등록!
+// (이 함수를 한 번만 호출해 두면 RtlMoveMemory조차 필요 없이 자동으로 DIB에 그려집니다!)
+__declspec(dllexport) void __stdcall GBA_SetScreenBuffer3X(void* dib_bits_ptr) {
+    if (dib_bits_ptr != NULL) {
+        screen_3x_ptr = (uint32_t*)dib_bits_ptr;
+    }
+    else {
+        screen_3x_ptr = gba_screen_3x;
+    }
+}
+
 // 2의 거듭제곱 정렬 함수 (ROM 미러링 마스크 계산용)
 static uint32_t to_pow2(uint32_t val) {
     val--;
@@ -212,12 +238,16 @@ __declspec(dllexport) void __stdcall GBA_SetKeys(uint16_t keys) {
     key_input.w = keys;
 }
 
+// video.c에 선언된 480x320 버퍼 참조
+extern uint32_t gba_screen_2x[480 * 320];
+
 // -----------------------------------------------------------------------------
 // 4. 1프레임 실행 및 화면 버퍼 포인터 반환
 // -----------------------------------------------------------------------------
 __declspec(dllexport) void* __stdcall GBA_RunFrame(void) {
     run_frame();
     return (void*)gba_screen;
+   // return (void*)gba_screen_2x; 
 }
 
 // -----------------------------------------------------------------------------

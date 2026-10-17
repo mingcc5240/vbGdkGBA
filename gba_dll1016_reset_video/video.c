@@ -17,9 +17,178 @@
 #define CYC_LINE_HBLK0  1006
 #define CYC_LINE_HBLK1  (CYC_LINE_TOTAL - CYC_LINE_HBLK0)
 
+// 필터 모드 변수 (0: 원본 도트 그대로 출력, 1: Scale2x 필터 적용)
+int video_filter_mode = 1;
+
 // 240x160 32비트 XRGB 화면 버퍼 (VB6 BitBlt / DIBSection 연동용)
 uint32_t gba_screen[240 * LINES_VISIBLE];
 void *screen = (void *)gba_screen;
+
+// [추가] 480x320 Scale2x 출력 버퍼 (VB6 DIBSection 포인터가 없을 때 기본 사용)
+uint32_t gba_screen_2x[480 * 320];
+uint32_t* screen_2x_ptr = gba_screen_2x; // VB6의 DIBSection 주소를 직접 가리킬 수도 있는 포인터!
+
+// [추가] 720x480 (3배 확대) 최종 출력 버퍼 및 DIBSection 연동 포인터
+uint32_t gba_screen_3x[720 * 480];
+uint32_t* screen_3x_ptr = gba_screen_3x;
+
+// 두 색상을 3:1 비율(75% : 25%)로 부드럽게 섞어주는 인라인 헬퍼 (선택 사항)
+static inline uint32_t mix_pixel(uint32_t c1, uint32_t c2) {
+    uint32_t rb = (((c1 & 0x00FF00FF) * 3) + (c2 & 0x00FF00FF)) >> 2;
+    uint32_t g = (((c1 & 0x0000FF00) * 3) + (c2 & 0x0000FF00)) >> 2;
+    return (rb & 0x00FF00FF) | (g & 0x0000FF00);
+}
+
+void apply_scale2x(void) {
+    // [모드 0] 원본 도트 모드 (Nearest-Neighbor: 각 픽셀을 단순 2x2로 복사하여 240x160 원본 느낌을 100% 유지)
+    if (video_filter_mode == 0) {
+        for (int y = 0; y < 160; y++) {
+            const uint32_t* row_p = &gba_screen[y * 240];
+            uint32_t* dst0 = &screen_2x_ptr[(y * 2 + 0) * 480];
+            uint32_t* dst1 = &screen_2x_ptr[(y * 2 + 1) * 480];
+
+            for (int x = 0; x < 240; x++) {
+                uint32_t P = row_p[x];
+                dst0[x * 2 + 0] = P;
+                dst0[x * 2 + 1] = P;
+                dst1[x * 2 + 0] = P;
+                dst1[x * 2 + 1] = P;
+            }
+        }
+        return;
+    }
+
+    // [모드 1] Scale2x (EPX) 대각선 보간 필터 모드
+    for (int y = 0; y < 160; y++) {
+        const uint32_t* row_b = &gba_screen[(y > 0 ? y - 1 : 0) * 240];
+        const uint32_t* row_p = &gba_screen[y * 240];
+        const uint32_t* row_h = &gba_screen[(y < 159 ? y + 1 : 159) * 240];
+
+        uint32_t* dst0 = &screen_2x_ptr[(y * 2 + 0) * 480];
+        uint32_t* dst1 = &screen_2x_ptr[(y * 2 + 1) * 480];
+
+        for (int x = 0; x < 240; x++) {
+            uint32_t B = row_b[x];
+            uint32_t P = row_p[x];
+            uint32_t H = row_h[x];
+            uint32_t D = row_p[x > 0 ? x - 1 : 0];
+            uint32_t F = row_p[x < 239 ? x + 1 : 239];
+
+            if (B != H && D != F) {
+                //dst0[x * 2 + 0] = (D == B) ? D : P;
+                dst0[x * 2 + 0] = (D == B) ? mix_pixel(D, P) : P;
+                dst0[x * 2 + 1] = (B == F) ? F : P;
+                dst1[x * 2 + 0] = (D == H) ? D : P;
+                dst1[x * 2 + 1] = (H == F) ? F : P;
+            }
+            else {
+                dst0[x * 2 + 0] = P;
+                dst0[x * 2 + 1] = P;
+                dst1[x * 2 + 0] = P;
+                dst1[x * 2 + 1] = P;
+            }
+        }
+    }
+}
+
+// 두 색상을 50:50 또는 특정한 비율로 부드럽게 섞어주는 헬퍼 (소프트 블렌딩용)
+static inline uint32_t mix_colors_3x(uint32_t c1, uint32_t c2) {
+    if (c1 == c2) return c1;
+    uint32_t r = (((c1 & 0x00FF00FF) + (c2 & 0x00FF00FF)) >> 1) & 0x00FF00FF;
+    uint32_t g = (((c1 & 0x0000FF00) + (c2 & 0x0000FF00)) >> 1) & 0x0000FF00;
+    return r | g;
+}
+
+static inline uint32_t mix_colors_weighted(uint32_t c1, uint32_t c2, uint32_t c3) {
+    // 3개 픽셀의 평균 색상 계산
+    uint32_t r = (((c1 & 0x00FF00FF) + (c2 & 0x00FF00FF) + (c3 & 0x00FF00FF)) / 3) & 0x00FF00FF;
+    uint32_t g = (((c1 & 0x0000FF00) + (c2 & 0x0000FF00) + (c3 & 0x0000FF00)) / 3) & 0x0000FF00;
+    return r | g;
+}
+
+void apply_scale3x(void) {
+    // [모드 0] 원본 도트 3배 확대 (Nearest-Neighbor)
+    if (video_filter_mode == 0) {
+        for (int y = 0; y < 160; y++) {
+            const uint32_t* row = &gba_screen[y * 240];
+            uint32_t* dst0 = &screen_3x_ptr[(y * 3 + 0) * 720];
+            uint32_t* dst1 = &screen_3x_ptr[(y * 3 + 1) * 720];
+            uint32_t* dst2 = &screen_3x_ptr[(y * 3 + 2) * 720];
+
+            for (int x = 0; x < 240; x++) {
+                uint32_t E = row[x];
+                int dx = x * 3;
+                dst0[dx + 0] = E; dst0[dx + 1] = E; dst0[dx + 2] = E;
+                dst1[dx + 0] = E; dst1[dx + 1] = E; dst1[dx + 2] = E;
+                dst2[dx + 0] = E; dst2[dx + 1] = E; dst2[dx + 2] = E;
+            }
+        }
+        return;
+    }
+
+    // [모드 1 또는 2] Scale3x / Eagle 스타일 보간 필터 (240x160 -> 720x480)
+    bool use_eagle_blend = (video_filter_mode >= 2); // 모드 2 이상이면 소프트 블렌딩(Eagle) 결합!
+
+    for (int y = 0; y < 160; y++) {
+        const uint32_t* row_prev = &gba_screen[(y > 0 ? y - 1 : 0) * 240];
+        const uint32_t* row_curr = &gba_screen[y * 240];
+        const uint32_t* row_next = &gba_screen[(y < 159 ? y + 1 : 159) * 240];
+
+        uint32_t* dst0 = &screen_3x_ptr[(y * 3 + 0) * 720];
+        uint32_t* dst1 = &screen_3x_ptr[(y * 3 + 1) * 720];
+        uint32_t* dst2 = &screen_3x_ptr[(y * 3 + 2) * 720];
+
+        for (int x = 0; x < 240; x++) {
+            int xm1 = (x > 0) ? (x - 1) : 0;
+            int xp1 = (x < 239) ? (x + 1) : 239;
+
+            // 3x3 주변 픽셀 추출 (A B C / D E F / G H I)
+            uint32_t A = row_prev[xm1], B = row_prev[x], C = row_prev[xp1];
+            uint32_t D = row_curr[xm1], E = row_curr[x], F = row_curr[xp1];
+            uint32_t G = row_next[xm1], H = row_next[x], I = row_next[xp1];
+
+            int dx = x * 3;
+
+            if (B != H && D != F) {
+                uint32_t e0 = (D == B) ? D : E;
+                uint32_t e2 = (B == F) ? F : E;
+                uint32_t e6 = (D == H) ? D : E;
+                uint32_t e8 = (H == F) ? F : E;
+
+                uint32_t e1 = ((D == B && E != C) || (B == F && E != A)) ? B : E;
+                uint32_t e3 = ((D == B && E != G) || (D == H && E != A)) ? D : E;
+                uint32_t e5 = ((B == F && E != I) || (H == F && E != C)) ? F : E;
+                uint32_t e7 = ((D == H && E != I) || (H == F && E != G)) ? H : E;
+
+                // 만약 Eagle 소프트 블렌딩 모드라면 경계면 픽셀들을 부드럽게 믹싱
+                if (use_eagle_blend) {
+                    if (D == B) e1 = mix_colors_3x(e1, B);
+                    if (B == F) e1 = mix_colors_3x(e1, F);
+                    if (D == H) e7 = mix_colors_3x(e7, H);
+                    if (H == F) e7 = mix_colors_3x(e7, F);
+                }
+
+                dst0[dx + 0] = e0;
+                dst0[dx + 1] = e1;
+                dst0[dx + 2] = e2;
+
+                dst1[dx + 0] = e3;
+                dst1[dx + 1] = E; // 중심 픽셀
+                dst1[dx + 2] = e5;
+
+                dst2[dx + 0] = e6;
+                dst2[dx + 1] = e7;
+                dst2[dx + 2] = e8;
+            }
+            else {
+                // 평탄한 영역은 원본 색상 유지
+                dst0[dx + 0] = E; dst0[dx + 1] = E; dst0[dx + 2] = E;
+                dst1[dx + 0] = E; dst1[dx + 1] = E; dst1[dx + 2] = E;
+                dst2[dx + 0] = E; dst2[dx + 1] = E; dst2[dx + 2] = E;
+            }
+        }
+    }
+}
 
 // 스캔라인별 픽셀의 출처 레이어 기록 (0~3: BG0~BG3, 4: OBJ, 5: Backdrop)
 static uint8_t line_layer[240];
@@ -694,6 +863,8 @@ void run_frame(void) {
 
     // 사운드 링버퍼 랩어라운드 처리
     sound_buffer_wrap();
+    // [추가!] 프레임 렌더링 완료 후 240x160 화면을 480x320 Scale2x 고화질 버퍼로 변환!
+    apply_scale3x();
 }
 
 void run_frame0(void) {
