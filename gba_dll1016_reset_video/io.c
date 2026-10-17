@@ -193,6 +193,33 @@ static void dma_load(uint8_t ch, uint8_t value) {
         if (dma_ch[ch].ctrl.w & DMA_32) {
             dma_dst_addr[ch] &= ~3;
             dma_src_addr[ch] &= ~3;
+        }
+        else {
+            dma_dst_addr[ch] &= ~1;
+            dma_src_addr[ch] &= ~1;
+        }
+
+        dma_count[ch] = dma_ch[ch].count.w;
+        if (dma_count[ch] == 0) {
+            dma_count[ch] = (ch == 3) ? 0x10000 : 0x4000;
+        }
+
+        dma_transfer(IMMEDIATELY);
+    }
+}
+
+static void dma_load0(uint8_t ch, uint8_t value) {
+    uint8_t old = dma_ch[ch].ctrl.b.b1;
+
+    dma_ch[ch].ctrl.b.b1 = value;
+
+    if ((old ^ value) & value & 0x80) {
+        dma_dst_addr[ch] = dma_ch[ch].dst.w;
+        dma_src_addr[ch] = dma_ch[ch].src.w;
+
+        if (dma_ch[ch].ctrl.w & DMA_32) {
+            dma_dst_addr[ch] &= ~3;
+            dma_src_addr[ch] &= ~3;
         } else {
             dma_dst_addr[ch] &= ~1;
             dma_src_addr[ch] &= ~1;
@@ -371,6 +398,18 @@ void io_write(uint32_t address, uint8_t value) {
             bg_refyi[3].b.b3 = value;
         break;
 
+        ////
+        // [핵심 추가!] 누락되어 있던 WIN0, WIN1 가로/세로 좌표 레지스터 (0x04000040 ~ 0x04000047)
+        case 0x04000040: win0_h.b.b0 = value; break; // WIN0 우측 X2
+        case 0x04000041: win0_h.b.b1 = value; break; // WIN0 좌측 X1
+        case 0x04000042: win1_h.b.b0 = value; break; // WIN1 우측 X2
+        case 0x04000043: win1_h.b.b1 = value; break; // WIN1 좌측 X1
+        case 0x04000044: win0_v.b.b0 = value; break; // WIN0 하단 Y2
+        case 0x04000045: win0_v.b.b1 = value; break; // WIN0 상단 Y1
+        case 0x04000046: win1_v.b.b0 = value; break; // WIN1 하단 Y2
+        case 0x04000047: win1_v.b.b1 = value; break; // WIN1 상단 Y1
+
+        ////
         case 0x04000048: win_in.b.b0          =  value; break;
         case 0x04000049: win_in.b.b1          =  value; break;
         case 0x0400004a: win_out.b.b0         =  value; break;

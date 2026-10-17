@@ -188,3 +188,12 @@ void io_write(uint32_t address, uint8_t value);
 void trigger_irq(uint16_t flag);
 
 void update_ws();
+
+// io.h의 win_in 선언부 위쪽에 추가
+io_reg win0_h;
+io_reg win1_h;
+io_reg win0_v;
+io_reg win1_v;
+
+io_reg win_in;
+io_reg win_out;

@@ -142,6 +142,8 @@ static void hardware_clear_all(void) {
     snd_bias.w    = 0x200;
     snd_psg_enb.w = PSG_ENB;
     wave_reset();
+
+    win0_h.w = 0; win1_h.w = 0; win0_v.w = 0; win1_v.w = 0;
 }
 
 __declspec(dllexport) int __stdcall GBA_Init(const char* rom_path) {

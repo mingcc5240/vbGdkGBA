@@ -352,15 +352,92 @@ void sound_clock(uint32_t cycles) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// VB6 waveOut용 믹서: 프레임 잠금(Frame-Lock) 동기화
-// -----------------------------------------------------------------------------
-// ... (중간 함수 생략: wave_reset ~ sound_clock 은 그대로 유지) ...
+// 이전 샘플과의 부드러운 연결을 위한 필터 상태 변수
+static int32_t lpf_left = 0;
+static int32_t lpf_right = 0;
 
-// -----------------------------------------------------------------------------
-// VB6 waveOut용 믹서: 동적 리샘플링 및 언더런 방지 적용
-// -----------------------------------------------------------------------------
-void sound_mix(void *data, uint8_t *stream, int32_t len) {
+void sound_mix(void* data, uint8_t* stream, int32_t len) {
+    int16_t* out = (int16_t*)stream;
+    int32_t out_frames = len / 4;
+    if (out_frames <= 0) return;
+
+    uint32_t avail_samples = snd_cur_write - snd_cur_play;
+
+    if (avail_samples > BUFF_SAMPLES) {
+        snd_cur_play = snd_cur_write - (BUFF_SAMPLES / 2);
+        avail_samples = BUFF_SAMPLES / 2;
+    }
+
+    uint32_t avail_frames = avail_samples / 2;
+
+    if (avail_frames == 0) {
+        for (int32_t i = 0; i < out_frames; i++) {
+            out[i * 2 + 0] = last_left;
+            out[i * 2 + 1] = last_right;
+        }
+        return;
+    }
+
+    double step = (double)avail_frames / (double)out_frames;
+    if (avail_frames >= (uint32_t)out_frames && avail_frames < (uint32_t)(out_frames * 2)) {
+        step = 1.0;
+    }
+
+    double read_pos = 0.0;
+
+    for (int32_t i = 0; i < out_frames; i++) {
+        uint32_t frame_idx = (uint32_t)read_pos;
+        double   frac = read_pos - (double)frame_idx; // 소수점 위치 (보간용)
+
+        if (frame_idx >= avail_frames) {
+            frame_idx = avail_frames - 1;
+            frac = 0.0;
+        }
+
+        uint32_t next_idx = (frame_idx + 1 < avail_frames) ? (frame_idx + 1) : frame_idx;
+
+        // 현재 샘플(s0)과 다음 샘플(s1) 인덱스
+        uint32_t idx0_l = (snd_cur_play + frame_idx * 2 + 0) & BUFF_SAMPLES_MSK;
+        uint32_t idx0_r = (snd_cur_play + frame_idx * 2 + 1) & BUFF_SAMPLES_MSK;
+        uint32_t idx1_l = (snd_cur_play + next_idx * 2 + 0) & BUFF_SAMPLES_MSK;
+        uint32_t idx1_r = (snd_cur_play + next_idx * 2 + 1) & BUFF_SAMPLES_MSK;
+
+        // 1. 선형 보간(Linear Interpolation): 샘플과 샘플 사이의 계단 현상을 매끄럽게 연결
+        double s_left = (1.0 - frac) * snd_buffer[idx0_l] + frac * snd_buffer[idx1_l];
+        double s_right = (1.0 - frac) * snd_buffer[idx0_r] + frac * snd_buffer[idx1_r];
+
+        // 2. 볼륨 증폭 (<< 6과 동일한 64배)
+        int32_t raw_left = (int32_t)(s_left * 64.0);
+        int32_t raw_right = (int32_t)(s_right * 64.0);
+
+        // 3. GBA 고유의 거친 고주파 노이즈를 다듬어주는 소프트 로우패스 필터 (비율 75% : 25%)
+        lpf_left = (raw_left * 3 + lpf_left) >> 2;
+        lpf_right = (raw_right * 3 + lpf_right) >> 2;
+
+        int32_t left = lpf_left;
+        int32_t right = lpf_right;
+
+        // 4. 클리핑 방지
+        if (left > 32767) left = 32767;
+        else if (left < -32768) left = -32768;
+
+        if (right > 32767) right = 32767;
+        else if (right < -32768) right = -32768;
+
+        out[i * 2 + 0] = (int16_t)left;
+        out[i * 2 + 1] = (int16_t)right;
+
+        read_pos += step;
+    }
+
+    uint32_t consumed_frames = (step == 1.0) ? (uint32_t)out_frames : avail_frames;
+    snd_cur_play += consumed_frames * 2;
+
+    last_left = out[(out_frames - 1) * 2 + 0];
+    last_right = out[(out_frames - 1) * 2 + 1];
+}
+
+void sound_mix1(void *data, uint8_t *stream, int32_t len) {
     int16_t *out = (int16_t *)stream;
     int32_t out_frames = len / 4; // 16비트 스테레오 기준 출력해야 할 총 프레임(쌍) 수
     if (out_frames <= 0) return;
@@ -405,8 +482,8 @@ void sound_mix(void *data, uint8_t *stream, int32_t len) {
         uint32_t idx_l = (snd_cur_play + frame_idx * 2 + 0) & BUFF_SAMPLES_MSK;
         uint32_t idx_r = (snd_cur_play + frame_idx * 2 + 1) & BUFF_SAMPLES_MSK;
 
-        int32_t left  = (int32_t)snd_buffer[idx_l] << 5;
-        int32_t right = (int32_t)snd_buffer[idx_r] << 5;
+        int32_t left  = (int32_t)snd_buffer[idx_l] << 7;
+        int32_t right = (int32_t)snd_buffer[idx_r] << 7;
 
         if (left > 32767) left = 32767;
         else if (left < -32768) left = -32768;
