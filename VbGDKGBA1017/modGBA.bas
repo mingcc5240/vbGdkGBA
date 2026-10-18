@@ -2,16 +2,16 @@ Attribute VB_Name = "modGBA"
 Option Explicit
 
 ' --- Win32 GDI & Memory API 선언 ---
-Public Declare Function CreateCompatibleDC Lib "gdi32" (ByVal hDC As Long) As Long
-Public Declare Function DeleteDC Lib "gdi32" (ByVal hDC As Long) As Long
+Public Declare Function CreateCompatibleDC Lib "gdi32" (ByVal hdc As Long) As Long
+Public Declare Function DeleteDC Lib "gdi32" (ByVal hdc As Long) As Long
 Public Declare Function CreateDIBSection Lib "gdi32" ( _
-    ByVal hDC As Long, _
+    ByVal hdc As Long, _
     ByRef pbmi As BITMAPINFO, _
     ByVal iUsage As Long, _
     ByRef ppvBits As Long, _
     ByVal hSection As Long, _
     ByVal dwOffset As Long) As Long
-Public Declare Function SelectObject Lib "gdi32" (ByVal hDC As Long, ByVal hObject As Long) As Long
+Public Declare Function SelectObject Lib "gdi32" (ByVal hdc As Long, ByVal hObject As Long) As Long
 Public Declare Function DeleteObject Lib "gdi32" (ByVal hObject As Long) As Long
 Public Declare Function BitBlt Lib "gdi32" ( _
     ByVal hDestDC As Long, ByVal X As Long, ByVal Y As Long, _
@@ -29,9 +29,11 @@ Public Declare Function StretchBlt Lib "gdi32" ( _
     ByVal dwRop As Long) As Long
 
 Public Declare Function SetStretchBltMode Lib "gdi32" ( _
-    ByVal hDC As Long, ByVal nStretchMode As Long) As Long
+    ByVal hdc As Long, ByVal nStretchMode As Long) As Long
 
 Public Const COLORONCOLOR As Long = 3 ' 도트 픽셀을 가장 선명하게 유지하는 모드
+Public Declare Function SetBrushOrgEx Lib "gdi32" (ByVal hdc As Long, ByVal nXOrg As Long, ByVal nYOrg As Long, lppt As Any) As Long
+
 ' --- Win32 고해상도 타이머 & 슬립 API ---
 Public Declare Function QueryPerformanceCounter Lib "kernel32" (ByRef lpPerformanceCount As Currency) As Long
 Public Declare Function QueryPerformanceFrequency Lib "kernel32" (ByRef lpFrequency As Currency) As Long
@@ -129,6 +131,25 @@ Public Const WHDR_BEGINLOOP As Long = &H4   ' 루프 시작 (&H00000004)
 Public Const WHDR_ENDLOOP As Long = &H8     ' 루프 종료 (&H00000008)
 Public Const WHDR_INQUEUE As Long = &H10    ' 드라이버 출력 큐에서 대기 중 (&H00000010)
 
+Public Declare Function GBA_SaveState Lib "gdkgba.dll" (ByVal StatePath As String) As Long
+Public Declare Function GBA_LoadState Lib "gdkgba.dll" (ByVal StatePath As String) As Long
+
+Public CurrentRomPath As String ' 현재 열려 있는 .gba 파일 전체 경로
+
+' ROM 파일 경로("C:\GBA\MetalSlug.gba")를 세이브 파일 경로("C:\GBA\MetalSlug.sav")로 변환
+Public Function GetStateFilePath(ByVal RomPath As String) As String
+    Dim dotPos As Long
+    If Len(RomPath) = 0 Then Exit Function
+    
+    dotPos = InStrRev(RomPath, ".")
+    If dotPos > 0 Then
+        GetStateFilePath = Left$(RomPath, dotPos - 1) & ".sav"
+    Else
+        GetStateFilePath = RomPath & ".sav"
+    End If
+End Function
+
+
     
 ''' <summary>
 ''' OCX 없이 Windows 표준 파일 선택 대화상자를 엽니다.
@@ -207,8 +228,12 @@ Public Sub RenderScreenStretchBlt(ByVal TargetHDC As Long, _
     ' CopyMemory pDIBBits, GBA_GetScreen2X(), GBA_W_2X * GBA_H_2X * 4&
     
     ' StretchBlt 확대 시 픽셀이 흐릿하게 깨지는 것을 방지
-    SetStretchBltMode TargetHDC, COLORONCOLOR
+    'SetStretchBltMode TargetHDC, COLORONCOLOR
     
+    ' RenderScreenStretchBlt 내부:
+   SetStretchBltMode TargetHDC, HALFTONE ' 3(COLORONCOLOR) 대신 4(HALFTONE) 사용!
+   SetBrushOrgEx TargetHDC, 0, 0, ByVal 0&
+   
     ' 480x320 메모리 DC(hMemDC)의 화면을 폼(TargetHDC)의 원하는 크기로 StretchBlt 출력!
     StretchBlt TargetHDC, _
                DstX, DstY, DstW, DstH, _

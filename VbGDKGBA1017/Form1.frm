@@ -60,15 +60,54 @@ Private m_Frequency As Currency
 Private m_TargetFrameTime As Double ' 1프레임당 시간 (초 단위: 1/59.7275 약 0.01674초)
 Private m_bLoopActive As Boolean ' 루프 중복 실행 방지 플래그 (폼 상단 선언부에 추가!)
 
+' [메뉴] 상태 저장하기 (Save State)
+Private Sub mnuSaveState_Click()
+    Dim SavePath As String
+    SavePath = GetStateFilePath(CurrentRomPath)
+    If Len(SavePath) = 0 Then Exit Sub
+    
+    If GBA_SaveState(SavePath) = 1 Then
+        Me.Caption = "VBgdkGBA | State Saved! (" & Dir$(SavePath) & ")"
+    Else
+        MsgBox "상태 저장에 실패했습니다.", vbExclamation
+    End If
+End Sub
+
+' [메뉴] 상태 불러오기 (Load State)
+Private Sub mnuLoadState_Click()
+    Dim SavePath As String
+    SavePath = GetStateFilePath(CurrentRomPath)
+    If Len(SavePath) = 0 Then Exit Sub
+    
+    If Dir$(SavePath) = "" Then
+        MsgBox "저장된 세이브 파일이 없습니다: " & SavePath, vbInformation
+        Exit Sub
+    End If
+    
+    If GBA_LoadState(SavePath) = 1 Then
+        DrawFrame ' 복원된 화면 즉시 그리기
+        Me.Caption = "gdkGBA | State Loaded! (" & Dir$(SavePath) & ")"
+    Else
+        MsgBox "세이브 파일을 불러올 수 없습니다.", vbExclamation
+    End If
+End Sub
+
 
 Private Sub Form_Load()
     Me.ScaleMode = vbPixels
     Me.AutoRedraw = True
     Me.KeyPreview = True
     
-    Me.Width = (GBA_WIDTH * 3 + 20) * Screen.TwipsPerPixelX
-    Me.Height = (GBA_HEIGHT * 3 + 90) * Screen.TwipsPerPixelY
-    Me.Caption = "gdkGBA Player (대기 중)"
+    ' Form_Load 마지막에 추가하여 게임 화면 영역을 정확히 720x480 픽셀로 고정!
+Dim TopBarHeight As Long
+TopBarHeight = 28 ' 상단 상태표시줄 높이
+Me.Width = (720 * Screen.TwipsPerPixelX) + (Me.Width - Me.ScaleWidth * Screen.TwipsPerPixelX)
+Me.Height = ((480 + TopBarHeight) * Screen.TwipsPerPixelY) + (Me.Height - Me.ScaleHeight * Screen.TwipsPerPixelY)
+
+    
+    'Me.Width = (GBA_WIDTH * 3 + 20) * Screen.TwipsPerPixelX
+    'Me.Height = (GBA_HEIGHT * 3 + 90) * Screen.TwipsPerPixelY
+    Me.Caption = "VBgdkGBA Player (대기 중)"
 
     m_KeyMask = &H3FF
     m_bRunning = False
@@ -88,7 +127,7 @@ Private Sub Form_Load()
     'InitDIBSection
     
     ' 480x320 DIBSection 및 메모리 DC 생성
-    InitVideo3X Me.hDC
+    InitVideo3X Me.hdc
     
     
     ' 폼을 화면에 먼저 노출시킨 후 게임 루프 진입
@@ -102,7 +141,7 @@ Private Sub DrawFrame()
     TopBarHeight = 28 ' 상단 상태표시줄 영역 높이(픽셀) - 필요에 맞게 조절하세요
     
     ' 폼 크기에 맞춰 480x320 Scale2x 화면을 StretchBlt로 꽉 차게 그림!
-    RenderScreenStretchBlt Me.hDC, _
+    RenderScreenStretchBlt Me.hdc, _
                            0, TopBarHeight, _
                            Me.ScaleWidth, Me.ScaleHeight - TopBarHeight
 End Sub
@@ -120,7 +159,7 @@ Private Sub InitDIBSection()
         .biSizeImage = GBA_WIDTH& * GBA_HEIGHT& * 4&
     End With
 
-    m_hMemDC = CreateCompatibleDC(Me.hDC)
+    m_hMemDC = CreateCompatibleDC(Me.hdc)
     m_hBitmap = CreateDIBSection(m_hMemDC, bmi, DIB_RGB_COLORS, m_pBits, 0, 0)
     m_hOldBitmap = SelectObject(m_hMemDC, m_hBitmap)
 End Sub
@@ -140,7 +179,7 @@ Private Sub MainGameLoop()
     doEventsCounter = 0
 
     ' 확대 모드는 루프 밖에서 한 번만 설정
-    Call SetStretchBltMode(Me.hDC, COLORONCOLOR)
+    Call SetStretchBltMode(Me.hdc, COLORONCOLOR)
 
     Do While Not m_bAppQuit
         If m_bRunning Then
@@ -164,7 +203,7 @@ Private Sub MainGameLoop()
                 End If
 
                 ' 4. 화면 출력 (Refresh 호출 제거)
-                Call StretchBlt(Me.hDC, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, _
+                Call StretchBlt(Me.hdc, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, _
                                 m_hMemDC, 0, 0, GBA_WIDTH * 2, GBA_HEIGHT * 2, SRCCOPY)
 
                 fpsCount = fpsCount + 1
@@ -273,6 +312,12 @@ End Sub
 ' 키보드 입력 매핑
 ' -----------------------------------------------------------------------------
 Private Sub Form_KeyDown(KeyCode As Integer, Shift As Integer)
+    If KeyCode = vbKeyF1 Then
+        mnuSaveState_Click
+    ElseIf KeyCode = vbKeyF2 Then
+        mnuLoadState_Click
+    End If
+  
     Select Case KeyCode
         Case vbKeyZ:      m_KeyMask = m_KeyMask And Not 1    ' A
         Case vbKeyX:      m_KeyMask = m_KeyMask And Not 2    ' B
@@ -285,9 +330,12 @@ Private Sub Form_KeyDown(KeyCode As Integer, Shift As Integer)
         Case vbKeyS:      m_KeyMask = m_KeyMask And Not 256  ' R
         Case vbKeyA:      m_KeyMask = m_KeyMask And Not 512  ' L
     End Select
+    
+  
 End Sub
 
 Private Sub Form_KeyUp(KeyCode As Integer, Shift As Integer)
+   
     Select Case KeyCode
         Case vbKeyZ:      m_KeyMask = m_KeyMask Or 1
         Case vbKeyX:      m_KeyMask = m_KeyMask Or 2
@@ -337,8 +385,8 @@ Public Function LoadNewROM1(ByVal sRomPath As String) As Boolean
         Call ZeroMemory(m_pBits, GBA_FRAME_BYTES)
     End If
     
-    Call SetStretchBltMode(Me.hDC, COLORONCOLOR)
-    Call StretchBlt(Me.hDC, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, _
+    Call SetStretchBltMode(Me.hdc, COLORONCOLOR)
+    Call StretchBlt(Me.hdc, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, _
                     m_hMemDC, 0, 0, GBA_WIDTH, GBA_HEIGHT, SRCCOPY)
     Me.Refresh
 
@@ -381,9 +429,9 @@ Public Function LoadNewROM(ByVal sRomPath As String) As Boolean
     End If
 
     
-    Call SetStretchBltMode(Me.hDC, COLORONCOLOR)
+    Call SetStretchBltMode(Me.hdc, COLORONCOLOR)
 
-    Call StretchBlt(Me.hDC, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, m_hMemDC, 0, 0, GBA_WIDTH * 2, GBA_HEIGHT * 2, SRCCOPY)
+    Call StretchBlt(Me.hdc, 0, 35, GBA_WIDTH * 3, GBA_HEIGHT * 3, m_hMemDC, 0, 0, GBA_WIDTH * 2, GBA_HEIGHT * 2, SRCCOPY)
 
     Me.Refresh
 
@@ -414,7 +462,9 @@ Public Function LoadNewROM(ByVal sRomPath As String) As Boolean
         Me.Caption = "gdkGBA Player (대기 중)"
 
     End If
-
+   
+   CurrentRomPath = sRomPath
+  ' MsgBox CurrentRomPath
 End Function
 
 Private Sub mEagle_Click()
@@ -442,11 +492,11 @@ End Sub
 
 
 Private Sub mLoad_Click()
-   Dim romPath As String
-    romPath = ShowOpenFileDialog(Me.hWnd)
-    If Trim$(romPath) = "" Then Exit Sub
+   Dim RomPath As String
+    RomPath = ShowOpenFileDialog(Me.hWnd)
+    If Trim$(RomPath) = "" Then Exit Sub
 
-    Call LoadNewROM(romPath)
+    Call LoadNewROM(RomPath)
     
     Call MainGameLoop0 ' <-- 두 번째 불러올 때 루프 안에 또 루프가 생성됨!
 End Sub
