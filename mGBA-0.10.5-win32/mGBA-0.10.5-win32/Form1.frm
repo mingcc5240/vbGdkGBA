@@ -58,17 +58,23 @@ Attribute VB_Exposed = False
 Option Explicit
 
 Private Const ROM_FILENAME As String = "metalslug.gba"
-
-Private Const GBA_W As Long = 240
-Private Const GBA_H As Long = 160
 Private Const MENU_HEIGHT As Long = 21
 
-' 240 * 160 = 38,400개의 픽셀을 담을 1차원 배열 (0번 인덱스부터 38399번까지)
-Private m_Pixels() As Long
-Private m_BMI As BITMAPINFO
+' 원본 해상도(240x160) 및 Edge2X 확대 해상도(480x320)
+Private Const GBA_W As Long = 240
+Private Const GBA_H As Long = 160
+Private Const DST_W As Long = 480 ' 240 * 2
+Private Const DST_H As Long = 320 ' 160 * 2
+
+' 순수 VB6 1차원 픽셀 배열 2개
+Private m_SrcPixels() As Long ' 0 To 38,399  (240 x 160)
+Private m_DstPixels() As Long ' 0 To 153,599 (480 x 320)
+
+Private m_SrcBMI As BITMAPINFO
+Private m_DstBMI As BITMAPINFO
 Private m_CapBuf As DIBBuffer
 
-' 현재 적용 중인 픽셀 조작 모드 (0: 원본, 1: 스캔라인, 2: 색상반전, 3: 고전 게임보이 녹색필터)
+' 필터 모드 (0: 기본 확대, 1: 순수 VB6 Edge2X, 2: Edge2X + 스캔라인)
 Private m_FilterMode As Integer
 
 Private Function GetAppPath(ByVal sFileName As String) As String
@@ -83,27 +89,42 @@ Private Sub Form_Load()
     Me.KeyPreview = True
     
     PicScreen.ScaleMode = vbPixels
+    PicScreen.BackColor = vbBlack
+    
     PicClone.ScaleMode = vbPixels
+    PicClone.BackColor = vbBlack
     PicClone.AutoRedraw = False
     SetStretchBltMode PicClone.hDC, COLORONCOLOR
     
-    ' 1. 캡처용 임시 버퍼(240x160) 생성
+    ' 1. 캡처용 DIB 버퍼 생성 (240x160)
     m_CapBuf = CreateFastDIB(GBA_W, GBA_H)
     
-    ' 2. 픽셀을 담을 1차원 배열 크기 할당 (0 ~ 38,399)
-    ReDim m_Pixels(0 To (GBA_W * GBA_H) - 1) As Long
+    ' 2. 원본(240x160) 및 타겟(480x320) 1차원 배열 메모리 할당
+    ReDim m_SrcPixels(0 To (GBA_W * GBA_H) - 1) As Long
+    ReDim m_DstPixels(0 To (DST_W * DST_H) - 1) As Long
     
-    ' 3. 1차원 배열용 BITMAPINFO 구조체 초기화 (Top-Down 32비트 RGB)
-    With m_BMI.bmiHeader
-        .biSize = Len(m_BMI.bmiHeader)
+    ' 3. 원본 배열용 BITMAPINFO (240x160)
+    With m_SrcBMI.bmiHeader
+        .biSize = Len(m_SrcBMI.bmiHeader)
         .biWidth = GBA_W
-        .biHeight = -GBA_H ' 음수(-): 0번 인덱스가 좌상단(0,0)이 되도록 설정
+        .biHeight = -GBA_H
         .biPlanes = 1
-        .biBitCount = 32   ' 1픽셀 = 4바이트(Long) = &H00RRGGBB
+        .biBitCount = 32
         .biCompression = BI_RGB
     End With
     
-    m_FilterMode = 1 ' 기본값: 스캔라인 효과 체험
+    ' 4. 타겟 배열용 BITMAPINFO (480x320)
+    With m_DstBMI.bmiHeader
+        .biSize = Len(m_DstBMI.bmiHeader)
+        .biWidth = DST_W
+        .biHeight = -DST_H
+        .biPlanes = 1
+        .biBitCount = 32
+        .biCompression = BI_RGB
+    End With
+    
+    m_FilterMode = 1
+    Me.Caption = "mGBA with VB6.0 - [F2: 순수 VB6 Edge2X 적용 중]"
 End Sub
 
 Private Sub cmdLaunch_Click()
@@ -112,10 +133,8 @@ Private Sub cmdLaunch_Click()
     Dim cmdLine As String
     
     mgbaPath = GetAppPath("mGBA.exe")
-    
     If Dir$(mgbaPath) = "" Then
-        MsgBox "현재 폴더에서 mGBA.exe를 찾을 수 없습니다." & vbCrLf & _
-               "경로: " & mgbaPath, vbExclamation, "파일 없음"
+        MsgBox "현재 폴더에서 mGBA.exe를 찾을 수 없습니다.", vbExclamation
         Exit Sub
     End If
     
@@ -136,29 +155,18 @@ Private Sub cmdLaunch_Click()
         g_mgbaHwnd = 0
     End If
     
-    m_FilterMode = 0
-    
-    On Error GoTo ErrHandler
     g_TargetPID = Shell(cmdLine, vbNormalFocus)
-    
     tmrFindWindow.Interval = 100
     tmrFindWindow.Enabled = True
-    
     PicScreen.SetFocus
-    Exit Sub
-
-ErrHandler:
-    MsgBox "mGBA 실행 실패! 오류 내용: " & Err.Description, vbCritical
 End Sub
 
 Private Sub tmrFindWindow_Timer()
     EnumWindows AddressOf EnumWindowsProc, 0
-    
     If g_mgbaHwnd <> 0 Then
         tmrFindWindow.Enabled = False
         EmbedWindow g_mgbaHwnd
         
-        ' 임베딩 완료 직후 고속 화면 복사 타이머 가동 (16ms = 약 60FPS)
         tmrCopy.Interval = 16
         tmrCopy.Enabled = True
     End If
@@ -166,7 +174,6 @@ End Sub
 
 Private Sub EmbedWindow(ByVal hWnd As Long)
     Dim lStyle As Long
-    
     lStyle = GetWindowLong(hWnd, GWL_STYLE)
     lStyle = lStyle And Not (WS_CAPTION Or WS_THICKFRAME Or WS_POPUP)
     lStyle = lStyle Or WS_CHILD
@@ -180,85 +187,134 @@ Private Sub EmbedWindow(ByVal hWnd As Long)
     PicScreen.SetFocus
 End Sub
 
-' 고속 화면 복사 타이머 이벤트
+' 매 프레임 캡처 -> 1차원 배열 추출 -> VB6 Edge2X 연산 -> picClone 출력
 Private Sub tmrCopy_Timer()
-   If g_mgbaHwnd = 0 Then Exit Sub
+    If g_mgbaHwnd = 0 Then Exit Sub
     
     Dim hSrcDC As Long
     Dim srcW As Long, srcH As Long
-    Dim i As Long, x As Long, y As Long
-    Dim c As Long, r As Long, g As Long, b As Long, gray As Long
     
-    ' [1단계] mGBA 화면에서 메뉴바(21픽셀)를 뺀 게임 화면을 m_CapBuf(240x160)로 캡처
     hSrcDC = GetDC(g_mgbaHwnd)
     If hSrcDC = 0 Then Exit Sub
     
     srcW = PicScreen.ScaleWidth
     srcH = PicScreen.ScaleHeight - MENU_HEIGHT
     
+    ' 1단계: mGBA 화면(메뉴바 제외)을 240x160 크기로 정규화하여 캡처
     SetStretchBltMode m_CapBuf.hDC, COLORONCOLOR
     StretchBlt m_CapBuf.hDC, 0, 0, GBA_W, GBA_H, hSrcDC, 0, MENU_HEIGHT, srcW, srcH, SRCCOPY
     ReleaseDC g_mgbaHwnd, hSrcDC
     
-    ' [2단계] 캡처된 이미지를 VB6의 1차원 배열 m_Pixels(0)으로 단번에 복사!
-    GetDIBits m_CapBuf.hDC, m_CapBuf.hDIB, 0, GBA_H, m_Pixels(0), m_BMI, DIB_RGB_COLORS
+    ' 2단계: 캡처된 240x160 비트맵을 원본 1차원 배열 m_SrcPixels(0 ~ 38399)로 복사
+    GetDIBits m_CapBuf.hDC, m_CapBuf.hDIB, 0, GBA_H, m_SrcPixels(0), m_SrcBMI, DIB_RGB_COLORS
     
-    ' =========================================================================
-    ' [3단계] 1차원 배열(m_Pixels) 직접 조작하기!
-    ' * 2차원 좌표 (x, y)와 1차원 인덱스(i)의 관계: i = y * 240 + x
-    ' * 각 원소 m_Pixels(i)에는 &H00RRGGBB 형태로 색상값이 들어있습니다.
-    ' =========================================================================
-    Select Case m_FilterMode
-    
-        Case 1 ' [효과 1] 레트로 CRT 스캔라인 (홀수 줄마다 밝기를 50%로 줄임)
-            For y = 1 To GBA_H - 1 Step 2
-                For x = 0 To GBA_W - 1
-                    i = y * GBA_W + x
-                    ' 각 RGB 채널을 2로 나누는 초고속 비트 마스킹 연산
-                    m_Pixels(i) = (m_Pixels(i) \ 2) And &H7F7F7F
-                Next x
-            Next y
-            
-        Case 2 ' [효과 2] 색상 반전 (네거티브 필름 효과)
-            For i = 0 To (GBA_W * GBA_H) - 1
-                m_Pixels(i) = m_Pixels(i) Xor &HFFFFFF
-            Next i
-            
-        Case 3 ' [효과 3] 1989년 초대 게임보이(DMG) 녹색 흑백 필터
-            For i = 0 To (GBA_W * GBA_H) - 1
-                c = m_Pixels(i)
-                r = (c And &HFF0000) \ &H10000
-                g = (c And &HFF00&) \ &H100&
-                b = (c And &HFF&)
-                
-                ' 평균 밝기(Grayscale) 계산 후 초록색 비율만 높여 합성
-                gray = (r + g + b) \ 3
-                m_Pixels(i) = ((gray \ 2) * &H10000) Or (gray * &H100&) Or (gray \ 4)
-            Next i
-            
-    End Select
-    
-    ' [4단계] 조작이 완료된 1차원 배열(m_Pixels)을 picClone 크기에 맞춰 화면에 즉시 출력!
-    StretchDIBits PicClone.hDC, _
-                  0, 0, PicClone.ScaleWidth, PicClone.ScaleHeight, _
-                  0, 0, GBA_W, GBA_H, _
-                  m_Pixels(0), m_BMI, DIB_RGB_COLORS, SRCCOPY
+    ' 3단계: 필터 모드에 따라 처리 후 picClone에 출력
+    If m_FilterMode = 0 Then
+        ' [F1 모드] 원본 240x160 배열을 그대로 출력 (네모난 도트 유지)
+        StretchDIBits PicClone.hDC, 0, 0, PicClone.ScaleWidth, PicClone.ScaleHeight, _
+                      0, 0, GBA_W, GBA_H, m_SrcPixels(0), m_SrcBMI, DIB_RGB_COLORS, SRCCOPY
+    Else
+        ' [F2 / F3 모드] 순수 VB6 코드로 240x160 배열을 480x320 배열로 Edge2X 업스케일링!
+        ApplyEdge2X_VB6 (m_FilterMode = 2)
+        
+        ' 완성된 480x320 타겟 배열(m_DstPixels)을 picClone에 출력
+        StretchDIBits PicClone.hDC, 0, 0, PicClone.ScaleWidth, PicClone.ScaleHeight, _
+                      0, 0, DST_W, DST_H, m_DstPixels(0), m_DstBMI, DIB_RGB_COLORS, SRCCOPY
+    End If
 End Sub
 
+' =============================================================================
+' [핵심 교육용 알고리즘] 순수 VB6 1차원 배열 Edge2X (Scale2x) 구현
+' 입력: m_SrcPixels(0 To 38399)  [240 x 160]
+' 출력: m_DstPixels(0 To 153599) [480 x 320]
+' =============================================================================
+Private Sub ApplyEdge2X_VB6(ByVal UseScanline As Boolean)
+    Dim x As Long, y As Long
+    Dim rowPrev As Long, rowCurr As Long, rowNext As Long
+    Dim dstRow0 As Long, dstRow1 As Long
+    Dim xPrev As Long, xNext As Long
+    Dim dx As Long
+    
+    ' 주변 픽셀(B, D, E, F, H) 및 2x2 확장 픽셀(E0, E1, E2, E3) 색상 변수
+    Dim B As Long, D As Long, E As Long, F As Long, H As Long
+    Dim E0 As Long, E1 As Long, E2 As Long, E3 As Long
+    
+    For y = 0 To GBA_H - 1
+        ' 1. 1차원 배열에서 현재 줄(y), 윗줄(y-1), 아랫줄(y+1)의 시작 인덱스 계산
+        rowCurr = y * GBA_W
+        If y > 0 Then rowPrev = rowCurr - GBA_W Else rowPrev = 0
+        If y < GBA_H - 1 Then rowNext = rowCurr + GBA_W Else rowNext = rowCurr
+        
+        ' 2. 480x320 타겟 1차원 배열에서 짝수 줄(y*2)과 홀수 줄(y*2+1)의 시작 인덱스 계산
+        dstRow0 = (y * 2) * DST_W
+        dstRow1 = dstRow0 + DST_W
+        
+        For x = 0 To GBA_W - 1
+            ' 좌우 경계 인덱스 계산
+            If x > 0 Then xPrev = x - 1 Else xPrev = 0
+            If x < GBA_W - 1 Then xNext = x + 1 Else xNext = GBA_W - 1
+            
+            ' 3. 1차원 배열에서 십자(+) 모양 5개 픽셀 꺼내기
+            '      [B]
+            '   [D][E][F]
+            '      [H]
+            B = m_SrcPixels(rowPrev + x)
+            D = m_SrcPixels(rowCurr + xPrev)
+            E = m_SrcPixels(rowCurr + x)
+            F = m_SrcPixels(rowCurr + xNext)
+            H = m_SrcPixels(rowNext + x)
+            
+            ' 4. Edge2X 대각선 보간 규칙 판별
+            If (B <> H) And (D <> F) Then
+                If D = B Then E0 = D Else E0 = E
+                If B = F Then E1 = F Else E1 = E
+                If D = H Then E2 = D Else E2 = E
+                If H = F Then E3 = F Else E3 = E
+            Else
+                E0 = E
+                E1 = E
+                E2 = E
+                E3 = E
+            End If
+            
+            ' 5. 480x320 타겟 배열에 2x2 픽셀로 기록
+            dx = x * 2
+            m_DstPixels(dstRow0 + dx) = E0
+            m_DstPixels(dstRow0 + dx + 1) = E1
+            
+            If UseScanline Then
+                ' [F3 모드] 아랫줄(홀수 줄) 밝기를 50%로 낮춰 브라운관 스캔라인 합성
+                m_DstPixels(dstRow1 + dx) = (E2 \ 2) And &H7F7F7F
+                m_DstPixels(dstRow1 + dx + 1) = (E3 \ 2) And &H7F7F7F
+            Else
+                m_DstPixels(dstRow1 + dx) = E2
+                m_DstPixels(dstRow1 + dx + 1) = E3
+            End If
+        Next x
+    Next y
+End Sub
 
 Private Sub Form_KeyDown(KeyCode As Integer, Shift As Integer)
+    ' F1, F2, F3 키로 실시간 화질 비교!
+    Select Case KeyCode
+        Case vbKeyF1
+            m_FilterMode = 0
+            Me.Caption = "mGBA with VB6.0 - [F1: 원본 도트 (240x160)]"
+            Exit Sub
+        Case vbKeyF2
+            m_FilterMode = 1
+            Me.Caption = "mGBA with VB6.0 - [F2: 순수 VB6 Edge2X (480x320)]"
+            Exit Sub
+        Case vbKeyF3
+            m_FilterMode = 2
+            Me.Caption = "mGBA with VB6.0 - [F3: 순수 VB6 Edge2X + CRT 스캔라인]"
+            Exit Sub
+    End Select
+
     If g_mgbaHwnd <> 0 Then
         PostMessage g_mgbaHwnd, WM_KEYDOWN, KeyCode, MakeKeyLParam(KeyCode, False)
         KeyCode = 0
     End If
-    
-    ' F1 ~ F4 키를 누르면 1차원 배열 픽셀 조작 모드를 즉시 변경!
-  '  Select Case KeyCode
-  '      Case vbKeyF1: m_FilterMode = 0: Me.Caption = "필터: 0 (원본 배열)": Exit Sub
-  '      Case vbKeyF2: m_FilterMode = 1: Me.Caption = "필터: 1 (CRT 스캔라인)": Exit Sub
-  '      Case vbKeyF3: m_FilterMode = 2: Me.Caption = "필터: 2 (색상 반전 Xor)": Exit Sub
-  '      Case vbKeyF4: m_FilterMode = 3: Me.Caption = "필터: 3 (초대 게임보이 녹색)": Exit Sub
-  '  End Select
 End Sub
 
 Private Sub Form_KeyUp(KeyCode As Integer, Shift As Integer)
@@ -274,5 +330,6 @@ Private Sub Form_Unload(Cancel As Integer)
         PostMessage g_mgbaHwnd, WM_CLOSE, 0, 0
         g_mgbaHwnd = 0
     End If
+    DestroyFastDIB m_CapBuf
 End Sub
 
